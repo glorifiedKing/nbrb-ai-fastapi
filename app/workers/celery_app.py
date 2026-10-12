@@ -35,8 +35,9 @@ def process_drawing_compliance(drawing_data: dict):
             "extracted_geometry": None
         }
     else:
-        # 2. Extract vector measurements
+        # 2. Extract vector measurements & floor area
         geometry = VectorMeasurementEngine.extract_door_and_window_vectors(file_path, scale_factor)
+        floor_area_data = VectorMeasurementEngine.extract_floor_area_from_sheet(file_path, scale_factor)
 
         # 3. Retrieve relevant building standards via RAG
         rag_query = f"{discipline} compliance rules for {occupancy} egress, ventilation, room dimensions"
@@ -56,6 +57,13 @@ def process_drawing_compliance(drawing_data: dict):
         payload["drawing_version_id"] = drawing_version_id
         payload["preflight_metrics"] = {"is_valid": True, "scale": scale_str, "scale_factor": scale_factor}
         payload["extracted_geometry"] = geometry
+
+        # If Gemini returned floor_area_metrics with valid GFA, preserve it; otherwise use vector/OCR extracted metrics
+        current_fam = payload.get("floor_area_metrics")
+        if not current_fam or not isinstance(current_fam, dict) or not current_fam.get("gross_floor_area_sqm"):
+            if discipline == "architectural" or floor_area_data.get("is_floor_plan"):
+                payload["floor_area_metrics"] = floor_area_data
+
 
     # 5. Dispatch results back to Laravel Webhook
     headers = {"X-Internal-Secret": settings.INTERNAL_API_SECRET}

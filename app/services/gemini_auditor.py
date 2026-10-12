@@ -47,9 +47,14 @@ class GeminiAuditor:
 
                 TASK:
                 1. Inspect room dimensions, door swing clearances, window light/ventilation ratios (min 10% floor area for habitable rooms), egress corridor widths, or MEP schedules.
-                2. Identify statutory code violations or confirm compliance.
-                3. Ground each finding in specific Ugandan regulations.
-                4. Return JSON strictly conforming to the requested schema.
+                2. If this is an ARCHITECTURAL floor plan drawing:
+                   - Identify if it is a floor plan (is_floor_plan = true).
+                   - Extract the Gross Floor Area (gross_floor_area_sqm in m²) from sheet schedule, title block, or plinth dimension notes.
+                   - Extract room schedule items (room name and area_sqm).
+                   - Populate the floor_area_metrics object in the response.
+                3. Identify statutory code violations or confirm compliance.
+                4. Ground each finding in specific Ugandan regulations.
+                5. Return JSON strictly conforming to the requested schema.
                 """
 
                 response = client.models.generate_content(
@@ -97,5 +102,7 @@ class GeminiAuditor:
             "preflight_metrics": {"is_valid": True, "engine": "deterministic_vector_audit"},
             "summary_metrics": {"pass_count": max(pass_count, 1), "fail_count": fail_count, "warning_count": 0},
             "discrepancies": discrepancies,
-            "extracted_geometry": measured_vectors
+            "extracted_geometry": measured_vectors,
+            "floor_area_metrics": None
         }
+

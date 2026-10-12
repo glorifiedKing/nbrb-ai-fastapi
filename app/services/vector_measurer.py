@@ -80,3 +80,123 @@ class VectorMeasurementEngine:
             }
         except Exception as e:
             return {"openings_detected_count": 0, "samples": [], "error": str(e)}
+
+    @staticmethod
+    def extract_floor_area_from_sheet(pdf_path: str, scale_factor: float = 0.03528) -> Dict[str, Any]:
+        """
+        Parses architectural floor plan sheets for Gross Floor Area (GFA)
+        via title block/schedule regex, room tables, or vector boundary estimation.
+        """
+        try:
+            doc = fitz.open(pdf_path)
+            if len(doc) == 0:
+                return {
+                    "is_floor_plan": False,
+                    "gross_floor_area_sqm": None,
+                    "net_internal_area_sqm": None,
+                    "confidence_score": 0.0,
+                    "source": "none",
+                    "room_breakdown": []
+                }
+
+            combined_text = ""
+            for page in doc:
+                combined_text += "\n" + page.get_text()
+
+            is_floor_plan = bool(re.search(r"\b(FLOOR\s*PLAN|GROUND\s*FLOOR|FIRST\s*FLOOR|TYPICAL\s*FLOOR|BASEMENT\s*PLAN|MEZZANINE|ROOF\s*PLAN)\b", combined_text, re.IGNORECASE))
+
+            # 1. Search for explicit gross floor area in title block or schedules
+            area_patterns = [
+                r"(?:TOTAL\s*GROSS\s*FLOOR\s*AREA|GROSS\s*FLOOR\s*AREA|TOTAL\s*FLOOR\s*AREA|PLINTH\s*AREA|BUILT[- ]UP\s*AREA)\s*[:=\-]?\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:SQM|SQ\.?\s*M|M2|M²)?",
+                r"(?:FLOOR\s*AREA)\s*[:=\-]?\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:SQM|SQ\.?\s*M|M2|M²)",
+                r"AREA\s*[:=\-]?\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:SQM|M2|M²)",
+            ]
+
+            detected_gfa = None
+            for pat in area_patterns:
+                match = re.search(pat, combined_text, re.IGNORECASE)
+                if match:
+                    val_str = match.group(1).replace(",", "")
+                    try:
+                        detected_gfa = float(val_str)
+                        if detected_gfa > 5:
+                            break
+                    except ValueError:
+                        continue
+
+            # 2. Extract room area schedule items if present
+            room_breakdown = []
+            room_pat = re.compile(
+                r"\b(LIVING\s*(?:ROOM)?|MASTER\s*BEDROOM|BEDROOM\s*\d*|KITCHEN|DINING\s*(?:ROOM)?|BATHROOM\s*\d*|TOILET|BALCONY|OFFICE|CONFERENCE|CORRIDOR|STORE|LOBBY)\b\s*[:=\-]?\s*([0-9]+(?:[\.,][0-9]+)?)\s*(?:SQM|M2|M²)?",
+                re.IGNORECASE
+            )
+            for m in room_pat.finditer(combined_text):
+                room_name = m.group(1).strip().title()
+                try:
+                    area_val = float(m.group(2).replace(",", ""))
+                    if 2.0 <= area_val <= 500.0:
+                        room_breakdown.append({"name": room_name, "area_sqm": round(area_val, 2)})
+                except ValueError:
+                    pass
+
+            # If room schedule exists and total GFA wasn't stated, sum the rooms
+            sum_rooms = sum(r["area_sqm"] for r in room_breakdown)
+            if detected_gfa is None and sum_rooms > 10:
+                detected_gfa = round(sum_rooms * 1.15, 2)  # add 15% circulation/wall thickness
+                source = "room_schedule_summation"
+                confidence = 0.85
+            elif detected_gfa is not None:
+                source = "title_block_schedule"
+                confidence = 0.95
+            else:
+                # 3. Vector geometry bounding estimation fallback if drawing contains dense vectors
+                first_page = doc[0]
+                drawings = first_page.get_drawings()
+                if is_floor_plan and len(drawings) >= 15:
+                    # Compute vector bounding box
+                    x0s = [d["rect"].x0 for d in drawings if d.get("rect")]
+                    y0s = [d["rect"].y0 for d in drawings if d.get("rect")]
+                    x1s = [d["rect"].x1 for d in drawings if d.get("rect")]
+                    y1s = [d["rect"].y1 for d in drawings if d.get("rect")]
+
+                    if x0s and y0s and x1s and y1s:
+                        span_w = (max(x1s) - min(x0s)) * scale_factor
+                        span_h = (max(y1s) - min(y0s)) * scale_factor
+                        # Plausible building floor span
+                        if 6.0 <= span_w <= 100.0 and 6.0 <= span_h <= 100.0:
+                            # Inferred usable footprint approx 55% of outer vector bounding envelope
+                            detected_gfa = round(span_w * span_h * 0.55, 2)
+                            source = "vector_polygon_estimation"
+                            confidence = 0.75
+                        else:
+                            detected_gfa = None
+                            source = "none"
+                            confidence = 0.0
+                    else:
+                        source = "none"
+                        confidence = 0.0
+                else:
+                    source = "none"
+                    confidence = 0.0
+
+            net_area = round(detected_gfa * 0.88, 2) if detected_gfa else None
+
+            return {
+                "is_floor_plan": is_floor_plan,
+                "gross_floor_area_sqm": detected_gfa,
+                "net_internal_area_sqm": net_area,
+                "confidence_score": confidence if detected_gfa else 0.0,
+                "source": source,
+                "room_breakdown": room_breakdown[:20]
+            }
+        except Exception as e:
+            return {
+                "is_floor_plan": False,
+                "gross_floor_area_sqm": None,
+                "net_internal_area_sqm": None,
+                "confidence_score": 0.0,
+                "source": "error",
+                "error": str(e),
+                "room_breakdown": []
+            }
+
