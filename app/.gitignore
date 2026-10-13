@@ -3,4 +3,4 @@
 .env.*
 !.env.example
 # Byte-compiled / optimized files
-**__pycache__/
+**/__pycache__/
