@@ -1,0 +1,6 @@
+# .gitignore
+.env
+.env.*
+!.env.example
+# Byte-compiled / optimized files
+**__pycache__/

@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF
 import re
 from typing import Tuple, Optional, Dict, Any
 
