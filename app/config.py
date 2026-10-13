@@ -1,13 +1,21 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Path(__file__).resolve().parent is the directory where config.py lives (i.e. 'app')
+ENV_PATH = Path(__file__).resolve().parent / ".env"
 
 class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = ""
-    DATABASE_URL: str = "postgresql://root_user:12345678@127.0.0.1:5432/nbrb_ai"
-    REDIS_URL: str = "redis://localhost:6379/0"
-    LARAVEL_WEBHOOK_URL: str = "http://localhost:8000/api/internal/compliance-webhook"
-    INTERNAL_API_SECRET: str = "bims-secure-internal-secret"
+    DATABASE_URL: str
+    REDIS_URL: str
+    LARAVEL_WEBHOOK_URL: str
+    INTERNAL_API_SECRET: str
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=ENV_PATH,
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
 settings = Settings()

@@ -40,15 +40,39 @@ class DiscrepancyItem(BaseModel):
 
 class RoomAreaItem(BaseModel):
     name: str
-    area_sqm: float
+    area_sqm: Optional[float] = None
+
+class FloorItem(BaseModel):
+    page: int
+    floor_name: str
+    gross_floor_area_sqm: Optional[float] = None
+    net_internal_area_sqm: Optional[float] = None
+    room_breakdown: List[RoomAreaItem] = []
 
 class FloorAreaMetrics(BaseModel):
     is_floor_plan: bool = False
-    gross_floor_area_sqm: Optional[float] = None
-    net_internal_area_sqm: Optional[float] = None
+    gross_floor_area_sqm: Optional[float] = None  # Cumulated total gross floor area across all floors
+    net_internal_area_sqm: Optional[float] = None # Cumulated net internal area
+    cumulated_floors_count: int = 1
     confidence_score: float = 0.90
     source: Optional[str] = "title_block_schedule"  # title_block_schedule, vector_polygon_estimation, gemini_multimodal
+    floors: List[FloorItem] = []
     room_breakdown: List[RoomAreaItem] = []
+
+class SummaryMetricsSchema(BaseModel):
+    pass_count: int = 0
+    fail_count: int = 0
+    warning_count: int = 0
+
+class GeminiAuditSchema(BaseModel):
+    """
+    Developer API strict schema: has NO Dict[str, Any], NO Dict[str, int], NO UUIDs,
+    and NO additionalProperties. Completely compatible with Gemini Developer API mode.
+    """
+    overall_status: OverallStatusEnum
+    summary_metrics: SummaryMetricsSchema
+    discrepancies: List[DiscrepancyItem] = []
+    floor_area_metrics: Optional[FloorAreaMetrics] = None
 
 class ComplianceResponse(BaseModel):
     drawing_version_id: uuid.UUID
@@ -58,4 +82,3 @@ class ComplianceResponse(BaseModel):
     discrepancies: List[DiscrepancyItem]
     extracted_geometry: Optional[Dict[str, Any]] = None
     floor_area_metrics: Optional[FloorAreaMetrics] = None
-
