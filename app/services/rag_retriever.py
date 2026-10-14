@@ -40,16 +40,17 @@ class RAGRetriever:
                 register_vector(conn)
                 with conn.cursor() as cur:
                     if query_vector:
+                        vector_str = "[" + ",".join(str(v) for v in query_vector) + "]"
                         sql = """
                         SELECT c.clause_number, c.clause_title, c.content, d.title
                         FROM regulatory_chunks c
                         JOIN regulatory_documents d ON d.id = c.regulatory_document_id
                         WHERE d.is_active = TRUE
                           AND (d.category = %s OR d.category = 'general_building_control' OR %s = 'general')
-                        ORDER BY c.embedding <=> %s
+                        ORDER BY c.embedding <=> %s::vector
                         LIMIT %s;
                         """
-                        cur.execute(sql, (discipline, discipline, query_vector, limit))
+                        cur.execute(sql, (discipline, discipline, vector_str, limit))
                     else:
                         keywords = [f"%{w.lower()}%" for w in query_text.split() if len(w) > 3]
                         if not keywords:
@@ -81,7 +82,9 @@ class RAGRetriever:
                         clause_title = row[1] or "Provision"
                         results.append(f"[{row[3]} - {clause_num} ({clause_title})]:\n{row[2]}")
 
-                    return "\n\n".join(results)
+                    if results:
+                        return "\n\n".join(results)
+                    return "Uganda National Building Code (2019) and Building Control Regulations (2020) require compliance with minimum room dimensions, light/ventilation ratios, and egress standards."
         except Exception as e:
             print(f"RAG retrieval error: {e}")
             return "Uganda National Building Code (2019) and Building Control Regulations (2020) require compliance with minimum room dimensions, light/ventilation ratios, and egress standards."

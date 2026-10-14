@@ -196,7 +196,7 @@ class RegulatoryIngestionEngine:
                 insert_query = """
                 INSERT INTO regulatory_chunks (
                     id, regulatory_document_id, clause_number, clause_title, content, metadata, embedding
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector);
                 """
 
                 rows_to_insert = [
@@ -207,7 +207,7 @@ class RegulatoryIngestionEngine:
                         c["clause_title"],
                         c["content"],
                         psycopg.types.json.Jsonb(c["metadata"]),
-                        embeddings[idx]
+                        "[" + ",".join(str(v) for v in embeddings[idx]) + "]"
                     )
                     for idx, c in enumerate(chunks)
                 ]

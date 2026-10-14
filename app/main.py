@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, status, APIRouter, UploadFile, File, Form
+from fastapi import FastAPI, Header, HTTPException, status, APIRouter, UploadFile, File, Form, BackgroundTasks
 from pydantic import BaseModel
 from app.models.schemas import AnalyzeDrawingRequest
 from app.services.document_ingestion import RegulatoryIngestionEngine
@@ -34,11 +34,12 @@ def health_check():
 @app.post("/api/v1/analyze-drawing", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_drawing_analysis(
     payload: AnalyzeDrawingRequest,
+    background_tasks: BackgroundTasks,
     x_internal_secret: str = Header(...)
 ):
     """
     Called by Laravel when a professional uploads a drawing to a floor.
-    Dispatches task to Redis/Celery worker or runs synchronous fallback.
+    Dispatches task to Redis/Celery worker or runs asynchronous background task fallback.
     """
     if x_internal_secret != settings.INTERNAL_API_SECRET:
         raise HTTPException(status_code=403, detail="Unauthorized internal call")
@@ -48,8 +49,8 @@ async def trigger_drawing_analysis(
         task = process_drawing_compliance.delay(payload.model_dump(mode="json"))
         task_id = task.id
     except Exception as e:
-        print(f"Celery queue offline, running compliance process in background thread: {e}")
-        process_drawing_compliance(payload.model_dump(mode="json"))
+        print(f"Celery queue offline, running compliance process in background task: {e}")
+        background_tasks.add_task(process_drawing_compliance, payload.model_dump(mode="json"))
 
     return {
         "status": "QUEUED",
