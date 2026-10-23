@@ -2,6 +2,7 @@ import pymupdf as fitz  # PyMuPDF
 import re
 import uuid
 import psycopg
+import math
 from pgvector.psycopg import register_vector
 from google import genai
 from google.genai import types
@@ -145,32 +146,87 @@ class RegulatoryIngestionEngine:
         return chunks
 
     @classmethod
-    def generate_embeddings_batch(cls, texts: List[str]) -> List[List[float]]:
-        """
-        Generates 768-dimensional embeddings using Gemini gemini-embedding-001 with MRL.
-        """
+    def generate_embeddings_batch(
+        cls,
+        texts: List[str],
+    ) -> List[List[float]]:
+        """Generate and validate Gemini embeddings. Never return fake vectors."""
+
+        if not texts:
+            return []
+
         client = cls.get_gemini_client()
-        embeddings = []
+
+        if client is None:
+            raise RuntimeError(
+                "Gemini client unavailable. Check GEMINI_API_KEY."
+            )
+
+        embeddings: List[List[float]] = []
         batch_size = 16
+        expected_dimensions = 768
 
-        if client:
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+
             try:
-                for i in range(0, len(texts), batch_size):
-                    batch = texts[i:i + batch_size]
-                    response = client.models.embed_content(
-                        model="gemini-embedding-001",
-                        contents=batch,
-                        config=types.EmbedContentConfig(
-                            output_dimensionality=768
-                        )
-                    )
-                    for item in response.embeddings:
-                        embeddings.append(item.values)
-                return embeddings
-            except Exception as e:
-                print(f"Gemini batch embedding error: {e}")
+                response = client.models.embed_content(
+                    model="gemini-embedding-001",
+                    contents=batch,
+                    config=types.EmbedContentConfig(
+                        output_dimensionality=expected_dimensions,
+                    ),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Gemini embedding failed for batch "
+                    f"{i // batch_size + 1}: {exc}"
+                ) from exc
 
-        return [[0.0] * 768 for _ in texts]
+            batch_embeddings = response.embeddings or []
+
+            if len(batch_embeddings) != len(batch):
+                raise RuntimeError(
+                    f"Expected {len(batch)} embeddings but received "
+                    f"{len(batch_embeddings)}."
+                )
+
+            for index, item in enumerate(batch_embeddings):
+                values = item.values
+
+                if values is None or len(values) != expected_dimensions:
+                    raise RuntimeError(
+                        f"Invalid embedding dimensions for chunk {i + index}."
+                    )
+
+                vector = [float(value) for value in values]
+
+                if not all(math.isfinite(value) for value in vector):
+                    raise RuntimeError(
+                        f"Embedding contains NaN or infinity at chunk "
+                        f"{i + index}."
+                    )
+
+                if not any(value != 0.0 for value in vector):
+                    raise RuntimeError(
+                        f"Embedding is entirely zero at chunk {i + index}. "
+                        "Aborting ingestion."
+                    )
+
+                embeddings.append(vector)
+
+            print(
+                f"Generated embeddings: "
+                f"{len(embeddings)}/{len(texts)}"
+            )
+
+        if len(embeddings) != len(texts):
+            raise RuntimeError(
+                f"Embedding count mismatch: {len(embeddings)} generated "
+                f"for {len(texts)} chunks."
+            )
+
+        return embeddings
 
     @classmethod
     def ingest_document(
