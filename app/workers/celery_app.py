@@ -64,6 +64,10 @@ def process_drawing_compliance(drawing_data: dict):
             if discipline == "architectural" or floor_area_data.get("is_floor_plan"):
                 payload["floor_area_metrics"] = floor_area_data
 
+        active_fam = payload.get("floor_area_metrics")
+        if active_fam and isinstance(active_fam, dict):
+            payload["gross_floor_area_sqm"] = active_fam.get("gross_floor_area_sqm")
+            payload["net_internal_area_sqm"] = active_fam.get("net_internal_area_sqm")
 
     # 5. Dispatch results back to Laravel Webhook
     headers = {"X-Internal-Secret": settings.INTERNAL_API_SECRET}

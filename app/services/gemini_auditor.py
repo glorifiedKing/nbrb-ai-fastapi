@@ -71,24 +71,35 @@ class GeminiAuditor:
         {regulatory_context}
 
         TASK:
-        1. Determine if this sheet is an ARCHITECTURAL FLOOR PLAN (is_floor_plan: true/false).
-        2. If is_floor_plan == true:
-           - Identify the floor name (e.g. "Basement Floor", "Ground Floor", "First Floor", "Second Floor", "Roof Terrace").
-           - Extract Gross Floor Area (gross_floor_area_sqm in m²) for this specific floor from sheet schedule, title block, or dimensions.
-           - Extract Net Internal Area (net_internal_area_sqm in m²) if present.
-           - Extract room schedule items (room name and area_sqm).
-        3. If is_floor_plan == false:
+        1. Determine if this sheet contains ARCHITECTURAL FLOOR PLAN(S) (is_floor_plan: true/false).
+        2. A sheet may contain ONE floor plan OR MULTIPLE floor plans drawn on the same sheet (e.g. "Ground Floor Plan", "First Floor Plan", "Mezzanine Floor Plan").
+        3. For each floor plan on this sheet, extract:
+           - floor_name (e.g. "Basement Floor Plan", "Ground Floor Plan", "First Floor Plan", "Typical Upper Floor", "Mezzanine Plan", "Roof Terrace").
+           - Gross Floor Area (gross_floor_area_sqm in m²) for this specific floor (measured from outside face of external walls, or from sheet area schedule).
+           - Net Internal Area (net_internal_area_sqm in m²) if stated or inferrable.
+           - Room schedule breakdown for this floor (name and area_sqm).
+        4. If is_floor_plan == false:
            - Explain sheet type (e.g. "Site Plan", "Elevation", "Cross Section", "Boundary Details").
-        4. Inspect layout for compliance with Ugandan regulations (dimensions, setbacks, egress, light/ventilation ratios >= 10% for habitable rooms, accessibility).
-        5. Identify statutory code violations or confirm compliance. Ground findings in specific Ugandan regulations.
+        5. Inspect layout for compliance with Ugandan regulations (dimensions, setbacks, egress, light/ventilation ratios >= 10% for habitable rooms, accessibility).
+        6. Identify statutory code violations or confirm compliance. Ground findings in specific Ugandan regulations.
 
         Output strictly valid JSON with no markdown wrapping:
         {{
           "sheet_title": "string",
           "is_floor_plan": true,
-          "floor_name": "Ground Floor",
-          "gross_floor_area_sqm": 405.0,
-          "net_internal_area_sqm": 360.0,
+          "floors": [
+            {{
+              "floor_name": "Ground Floor Plan",
+              "gross_floor_area_sqm": 405.0,
+              "net_internal_area_sqm": 360.0,
+              "room_breakdown": [
+                {{
+                  "name": "Outdoor Dining",
+                  "area_sqm": 120.0
+                }}
+              ]
+            }}
+          ],
           "overall_status": "PASS" | "WARNING" | "FAIL",
           "summary_metrics": {{
             "pass_count": 3,
@@ -104,12 +115,6 @@ class GeminiAuditor:
               "observed_value": "0.90 m",
               "severity": "INFO" | "WARNING" | "ERROR",
               "recommendation": "Complies with statutory escape route standard"
-            }}
-          ],
-          "room_breakdown": [
-            {{
-              "name": "Outdoor Dining",
-              "area_sqm": 120.0
             }}
           ]
         }}
@@ -207,46 +212,82 @@ class GeminiAuditor:
                     page_num = page_idx + 1
                     sheet_title = result.get("sheet_title", f"Sheet {page_num}")
                     is_fp = result.get("is_floor_plan", False)
-                    floor_name = result.get("floor_name") or f"Floor (Sheet {page_num})"
-                    gfa = result.get("gross_floor_area_sqm")
-                    nia = result.get("net_internal_area_sqm")
 
-                    cleaned_rooms = []
-                    for r in result.get("room_breakdown", []):
-                        if isinstance(r, dict):
-                            r_name = r.get("name") or r.get("room_name") or "Unnamed Room"
-                            r_area = r.get("area_sqm")
-                            try:
-                                r_area = float(r_area) if r_area is not None else None
-                            except (ValueError, TypeError):
-                                r_area = None
-                            room_entry = {"name": f"[{floor_name}] {r_name}", "area_sqm": r_area}
-                            cleaned_rooms.append(room_entry)
-                            all_rooms.append(room_entry)
+                    # Extract floor list (supports multi-floor on single sheet or single-floor format)
+                    sheet_floors = []
+                    raw_floors = result.get("floors")
+                    if isinstance(raw_floors, list) and len(raw_floors) > 0:
+                        for f in raw_floors:
+                            if isinstance(f, dict):
+                                sheet_floors.append(f)
+                    elif is_fp and (result.get("gross_floor_area_sqm") is not None or result.get("floor_name")):
+                        sheet_floors.append({
+                            "floor_name": result.get("floor_name") or f"Floor (Sheet {page_num})",
+                            "gross_floor_area_sqm": result.get("gross_floor_area_sqm"),
+                            "net_internal_area_sqm": result.get("net_internal_area_sqm"),
+                            "room_breakdown": result.get("room_breakdown", [])
+                        })
 
-                    if is_fp and gfa is not None:
-                        try:
-                            gfa_val = float(gfa)
-                            if gfa_val > 0:
-                                cumulated_gfa += gfa_val
-                                if nia is not None:
+                    # Process each floor detected on this sheet
+                    for f in sheet_floors:
+                        f_name = f.get("floor_name") or f"Floor (Sheet {page_num})"
+                        f_gfa = f.get("gross_floor_area_sqm")
+                        f_nia = f.get("net_internal_area_sqm")
+                        raw_r = f.get("room_breakdown") or result.get("room_breakdown", [])
+
+                        floor_rooms = []
+                        if isinstance(raw_r, list):
+                            for r in raw_r:
+                                if isinstance(r, dict):
+                                    r_name = r.get("name") or r.get("room_name") or "Unnamed Room"
+                                    r_area = r.get("area_sqm")
                                     try:
-                                        cumulated_nia += float(nia)
+                                        r_area = float(r_area) if r_area is not None else None
                                     except (ValueError, TypeError):
-                                        pass
-                                detected_floors.append({
-                                    "page": page_num,
-                                    "floor_name": floor_name,
-                                    "gross_floor_area_sqm": gfa_val,
-                                    "net_internal_area_sqm": float(nia) if nia else None,
-                                    "room_breakdown": cleaned_rooms
-                                })
-                        except (ValueError, TypeError):
-                            pass
+                                        r_area = None
+                                    labeled_name = r_name if r_name.startswith(f"[{f_name}]") else f"[{f_name}] {r_name}"
+                                    room_item = {"name": labeled_name, "area_sqm": r_area}
+                                    floor_rooms.append(room_item)
+                                    all_rooms.append(room_item)
+
+                        # Try converting GFA
+                        gfa_val = None
+                        if f_gfa is not None:
+                            try:
+                                gfa_val = float(f_gfa)
+                            except (ValueError, TypeError):
+                                gfa_val = None
+
+                        # Fallback: estimate GFA from room breakdown if GFA is missing
+                        if (gfa_val is None or gfa_val <= 0) and floor_rooms:
+                            valid_room_sum = sum(r["area_sqm"] for r in floor_rooms if r.get("area_sqm"))
+                            if valid_room_sum > 10:
+                                gfa_val = round(valid_room_sum * 1.15, 2)
+
+                        if gfa_val and gfa_val > 0:
+                            cumulated_gfa += gfa_val
+                            nia_val = None
+                            if f_nia is not None:
+                                try:
+                                    nia_val = float(f_nia)
+                                except (ValueError, TypeError):
+                                    nia_val = None
+                            if nia_val is None:
+                                nia_val = round(gfa_val * 0.88, 2)
+                            cumulated_nia += nia_val
+
+                            detected_floors.append({
+                                "page": page_num,
+                                "floor_name": f_name,
+                                "gross_floor_area_sqm": round(gfa_val, 2),
+                                "net_internal_area_sqm": round(nia_val, 2),
+                                "room_breakdown": floor_rooms
+                            })
 
                     for d in result.get("discrepancies", []):
                         if isinstance(d, dict):
-                            loc_tag = f"[Sheet {page_num}: {floor_name if is_fp else sheet_title}]"
+                            first_f_name = sheet_floors[0].get("floor_name") if sheet_floors else sheet_title
+                            loc_tag = f"[Sheet {page_num}: {first_f_name}]"
                             d["room_or_grid"] = f"{loc_tag} {d.get('room_or_grid', '')}".strip()
                             all_discrepancies.append(d)
 
