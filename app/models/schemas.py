@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 import uuid
 
@@ -18,7 +18,7 @@ class OverallStatusEnum(str, Enum):
 class AnalyzeDrawingRequest(BaseModel):
     drawing_version_id: uuid.UUID
     drawing_id: Optional[uuid.UUID] = None
-    discipline: DisciplineEnum
+    discipline: Union[DisciplineEnum, str] = DisciplineEnum.ARCHITECTURAL
     file_path: str
     occupancy_class: Optional[str] = "Class A (Residential)"
 

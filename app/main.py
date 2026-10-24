@@ -89,6 +89,13 @@ async def ingest_regulatory_document(
             "total_chunks_vectorized": total_chunks,
             "message": f"Regulatory standard parsed, embedded, and indexed ({total_chunks} clauses)."
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document ingestion failed: {str(e)}"
+        )
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

@@ -21,12 +21,36 @@ class RegulatoryIngestionEngine:
         return None
 
     @staticmethod
+    def _sanitize_text(val: Optional[str]) -> str:
+        """
+        Removes null bytes (0x00) which are forbidden in PostgreSQL text and JSON fields.
+        """
+        if not val:
+            return ""
+        return val.replace("\x00", "")
+
+    @classmethod
+    def _sanitize_metadata(cls, meta: Any) -> Any:
+        """
+        Recursively sanitizes metadata dictionaries, lists, and strings of any null bytes.
+        """
+        if isinstance(meta, str):
+            return cls._sanitize_text(meta)
+        elif isinstance(meta, dict):
+            return {cls._sanitize_text(str(k)): cls._sanitize_metadata(v) for k, v in meta.items()}
+        elif isinstance(meta, list):
+            return [cls._sanitize_metadata(item) for item in meta]
+        return meta
+
+    @staticmethod
     def decode_char_shifted(c: str) -> str:
         """
         Decodes characters from PDFs exported with custom TrueType/Identity-H font subsets
         lacking ToUnicode CMaps, where glyph IDs are shifted by -29 relative to ASCII.
         """
         code = ord(c)
+        if code == 0:
+            return ''
         if 0x0D7A <= code <= 0x0D93:
             # Small-caps uppercase A-Z mapped sequentially from 0x0d7a (3450)
             return chr(code - 0x0D7A + ord('A'))
@@ -89,9 +113,10 @@ class RegulatoryIngestionEngine:
                         if line_str.strip():
                             lines_out.append(line_str)
                 page_text = '\n'.join(lines_out)
+            page_text = cls._sanitize_text(page_text)
             full_text += f"\n--- PAGE {page_num + 1} ---\n" + page_text
 
-        return full_text
+        return cls._sanitize_text(full_text)
 
     @classmethod
     def extract_and_chunk_pdf(cls, pdf_path: str) -> List[Dict[str, Any]]:
@@ -109,9 +134,9 @@ class RegulatoryIngestionEngine:
 
         chunks = []
         for match in clause_pattern.finditer(full_text):
-            clause_num = match.group("clause").strip()
-            title = match.group("title").strip()
-            body = match.group("body").strip()
+            clause_num = cls._sanitize_text(match.group("clause")).strip()
+            title = cls._sanitize_text(match.group("title")).strip()
+            body = cls._sanitize_text(match.group("body")).strip()
 
             cleaned_body = re.sub(r"--- PAGE \d+ ---", "", body).strip()
 
@@ -119,7 +144,7 @@ class RegulatoryIngestionEngine:
                 chunks.append({
                     "clause_number": clause_num,
                     "clause_title": title,
-                    "content": f"{clause_num} {title}\n{cleaned_body}",
+                    "content": cls._sanitize_text(f"{clause_num} {title}\n{cleaned_body}"),
                     "metadata": {
                         "source": "Uganda Building Regulations & Code",
                         "title": title
@@ -134,7 +159,7 @@ class RegulatoryIngestionEngine:
             chunks = []
             for i in range(0, len(words), chunk_size - overlap):
                 chunk_slice = " ".join(words[i:i + chunk_size])
-                cleaned_slice = re.sub(r"--- PAGE \d+ ---", "", chunk_slice).strip()
+                cleaned_slice = cls._sanitize_text(re.sub(r"--- PAGE \d+ ---", "", chunk_slice)).strip()
                 if len(cleaned_slice) > 40:
                     chunks.append({
                         "clause_number": f"Sec-{(i // (chunk_size - overlap)) + 1}",
@@ -237,44 +262,57 @@ class RegulatoryIngestionEngine:
         """
         Parses PDF, computes embeddings, and performs batch insertion into PostgreSQL.
         """
-        chunks = cls.extract_and_chunk_pdf(pdf_path)
-        if not chunks:
-            raise ValueError("No extractable text or clauses found in statutory PDF.")
+        try:
+            chunks = cls.extract_and_chunk_pdf(pdf_path)
+            if not chunks:
+                raise ValueError("No extractable text or clauses found in statutory PDF.")
 
-        chunk_texts = [c["content"] for c in chunks]
-        embeddings = cls.generate_embeddings_batch(chunk_texts)
+            chunk_texts = [cls._sanitize_text(c["content"]) for c in chunks]
+            embeddings = cls.generate_embeddings_batch(chunk_texts)
 
-        with psycopg.connect(settings.DATABASE_URL) as conn:
-            register_vector(conn)
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM regulatory_chunks WHERE regulatory_document_id = %s;", (document_id,))
+            with psycopg.connect(settings.DATABASE_URL) as conn:
+                register_vector(conn)
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM regulatory_chunks WHERE regulatory_document_id = %s;", (document_id,))
 
-                insert_query = """
-                INSERT INTO regulatory_chunks (
-                    id, regulatory_document_id, clause_number, clause_title, content, metadata, embedding
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector);
-                """
+                    insert_query = """
+                    INSERT INTO regulatory_chunks (
+                        id, regulatory_document_id, clause_number, clause_title, content, metadata, embedding
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector);
+                    """
 
-                rows_to_insert = [
-                    (
-                        str(uuid.uuid4()),
-                        document_id,
-                        c["clause_number"],
-                        c["clause_title"],
-                        c["content"],
-                        psycopg.types.json.Jsonb(c["metadata"]),
-                        "[" + ",".join(str(v) for v in embeddings[idx]) + "]"
+                    rows_to_insert = [
+                        (
+                            str(uuid.uuid4()),
+                            document_id,
+                            cls._sanitize_text(c["clause_number"]),
+                            cls._sanitize_text(c["clause_title"]),
+                            cls._sanitize_text(c["content"]),
+                            psycopg.types.json.Jsonb(cls._sanitize_metadata(c.get("metadata", {}))),
+                            "[" + ",".join(str(v) for v in embeddings[idx]) + "]"
+                        )
+                        for idx, c in enumerate(chunks)
+                    ]
+
+                    cur.executemany(insert_query, rows_to_insert)
+
+                    cur.execute(
+                        "UPDATE regulatory_documents SET total_chunks = %s, status = 'indexed', error_message = NULL, updated_at = NOW() WHERE id = %s;",
+                        (len(chunks), document_id)
                     )
-                    for idx, c in enumerate(chunks)
-                ]
 
-                cur.executemany(insert_query, rows_to_insert)
+                    conn.commit()
 
-                cur.execute(
-                    "UPDATE regulatory_documents SET total_chunks = %s, status = 'indexed', error_message = NULL, updated_at = NOW() WHERE id = %s;",
-                    (len(chunks), document_id)
-                )
-
-                conn.commit()
-
-        return len(chunks)
+            return len(chunks)
+        except Exception as e:
+            try:
+                with psycopg.connect(settings.DATABASE_URL) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE regulatory_documents SET status = 'failed', error_message = %s, updated_at = NOW() WHERE id = %s;",
+                            (str(e)[:500], document_id)
+                        )
+                        conn.commit()
+            except Exception as update_err:
+                print(f"Failed to record ingestion error in regulatory_documents: {update_err}")
+            raise

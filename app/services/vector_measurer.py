@@ -22,15 +22,20 @@ class VectorMeasurementEngine:
             combined_text += " " + doc[p_idx].get_text()
 
         scale_patterns = [
-            (r"1\s*:\s*100", 0.03528, "1:100"),
-            (r"1\s*:\s*50", 0.01764, "1:50"),
-            (r"1\s*:\s*200", 0.07056, "1:200"),
-            (r"1\s*:\s*20", 0.007056, "1:20"),
-            (r"1\s*:\s*25", 0.00882, "1:25"),
-            (r"1\s*:\s*500", 0.1764, "1:500"),
+            (r"1\s*:\s*100\b", 0.03528, "1:100"),
+            (r"1\s*:\s*50\b", 0.01764, "1:50"),
+            (r"1\s*:\s*200\b", 0.07056, "1:200"),
+            (r"1\s*:\s*20\b", 0.007056, "1:20"),
+            (r"1\s*:\s*25\b", 0.00882, "1:25"),
+            (r"1\s*:\s*10\b", 0.003528, "1:10"),
+            (r"1\s*:\s*15\b", 0.005292, "1:15"),
+            (r"1\s*:\s*75\b", 0.02646, "1:75"),
+            (r"1\s*:\s*250\b", 0.0882, "1:250"),
+            (r"1\s*:\s*500\b", 0.1764, "1:500"),
             (r"1/4\"\s*=\s*1'-0\"", 0.03528, "1/4\" = 1'-0\""),
-            (r"SCALE\s*[:=\-]?\s*1\s*/\s*100", 0.03528, "1:100"),
-            (r"SCALE\s*[:=\-]?\s*1\s*/\s*50", 0.01764, "1:50"),
+            (r"SCALE\s*[:=\-]?\s*1\s*/\s*100\b", 0.03528, "1:100"),
+            (r"SCALE\s*[:=\-]?\s*1\s*/\s*50\b", 0.01764, "1:50"),
+            (r"\b(?:N\.?T\.?S\.?|NOT\s*TO\s*SCALE|SCHEMATIC|DIAGRAMMATIC)\b", 0.03528, "N.T.S. (Schematic)"),
         ]
 
         for pattern, factor, standard_name in scale_patterns:
@@ -42,7 +47,187 @@ class VectorMeasurementEngine:
         if len(drawings) > 10:
             return True, "1:100 (Inferred)", 0.03528, "Inferred default scale 1:100 based on vector density."
 
-        return False, None, None, "No standard scale callout (e.g. 1:100, 1:50) detected in drawing."
+        return False, None, None, "No standard scale callout (e.g. 1:100, 1:50, NTS) detected in drawing."
+
+    @staticmethod
+    def detect_drawing_discipline_and_type(
+        pdf_path: str,
+        supplied_discipline: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Detects engineering discipline (architectural, structural, mechanical, electrical)
+        and specific drawing type from PDF text, title blocks, schedules, and drawing annotations.
+        Reconciles with supplied_discipline if provided.
+        """
+        try:
+            doc = fitz.open(pdf_path)
+            sample_text = ""
+            num_pages = min(8, len(doc))
+            for p in range(num_pages):
+                sample_text += "\n" + doc[p].get_text()
+        except Exception:
+            return {
+                "resolved_discipline": (supplied_discipline or "architectural").lower(),
+                "detected_discipline": "unknown",
+                "drawing_type": "Standard Engineering Drawing",
+                "confidence": 0.5,
+                "indicators": []
+            }
+
+        text_upper = sample_text.upper()
+
+        scores = {
+            "structural": 0,
+            "electrical": 0,
+            "mechanical": 0,
+            "architectural": 0
+        }
+        indicators = {
+            "structural": [],
+            "electrical": [],
+            "mechanical": [],
+            "architectural": []
+        }
+
+        # Structural signatures
+        structural_keywords = [
+            ("STRUCTURAL ENGINEER", 10), ("CIVIL STRUCTURAL", 10), ("FOUNDATION LAYOUT", 8),
+            ("FOOTING DETAIL", 8), ("COLUMN SCHEDULE", 8), ("BEAM SCHEDULE", 8),
+            ("GROUND BEAM", 6), ("SLAB BEAM", 6), ("REINFORCEMENT", 6),
+            ("BENDING SCHEDULE", 7), ("SOLID SLAB", 5), ("PAD FOOTING", 6),
+            ("STRIP FOOTING", 6), ("ROOF TRUSS", 5), ("CONCRETE COVER", 5),
+            ("GRADE 25", 5), ("GRADE 30", 5), ("STIRRUPS", 4), ("LINKS", 3),
+            ("T10", 3), ("T12", 3), ("T16", 3), ("Y12", 3), ("Y16", 3), ("Y20", 3),
+            ("DEFLECTION", 3), ("CHARACTERISTIC STRENGTH", 4)
+        ]
+        for kw, weight in structural_keywords:
+            if kw in text_upper:
+                scores["structural"] += weight
+                indicators["structural"].append(kw)
+
+        # Electrical signatures
+        electrical_keywords = [
+            ("ELECTRICAL ENGINEER", 10), ("SINGLE LINE DIAGRAM", 10), ("SLD", 6),
+            ("DISTRIBUTION BOARD", 8), ("DB SCHEDULE", 8), ("LIGHTING LAYOUT", 7),
+            ("POWER LAYOUT", 7), ("SMALL POWER", 6), ("EARTHING AND LIGHTNING", 8),
+            ("LIGHTNING PROTECTION", 7), ("EARTH ELECTRODE", 6), ("MAIN ISOLATOR", 6),
+            ("CIRCUIT BREAKER", 5), ("MCB", 4), ("MCCB", 4), ("RCD", 5), ("RCCB", 5),
+            ("LUMINAIRE", 4), ("SOCKET OUTLET", 4), ("415V", 3), ("240V", 3),
+            ("THREE PHASE", 4), ("SINGLE PHASE", 3), ("KVA", 3), ("LUX LEVEL", 4)
+        ]
+        for kw, weight in electrical_keywords:
+            if kw in text_upper:
+                scores["electrical"] += weight
+                indicators["electrical"].append(kw)
+
+        # Mechanical & Plumbing signatures
+        mechanical_keywords = [
+            ("MECHANICAL ENGINEER", 10), ("HVAC", 9), ("AIR CONDITIONING", 8),
+            ("DUCTWORK", 8), ("SUPPLY AIR", 6), ("RETURN AIR", 6), ("EXHAUST FAN", 6),
+            ("DIFFUSER", 5), ("FIRE DAMPER", 7), ("PLUMBING AND DRAINAGE", 9),
+            ("FOUL DRAINAGE", 8), ("SOIL VENT PIPE", 7), ("SVP", 5), ("INVERT LEVEL", 6),
+            ("GREASE TRAP", 8), ("MANHOLE", 5), ("WATER RETICULATION", 7),
+            ("HOSE REEL", 6), ("BOOSTER PUMP", 5), ("WATER STORAGE", 5),
+            ("RAINWATER HARVESTING", 5), ("CFM", 4), ("AIR CHANGES", 5)
+        ]
+        for kw, weight in mechanical_keywords:
+            if kw in text_upper:
+                scores["mechanical"] += weight
+                indicators["mechanical"].append(kw)
+
+        # Architectural signatures
+        architectural_keywords = [
+            ("ARCHITECTURAL", 10), ("ARCHITECT", 8), ("FLOOR PLAN", 7),
+            ("GROUND FLOOR PLAN", 7), ("FIRST FLOOR PLAN", 7), ("ROOM SCHEDULE", 7),
+            ("DOOR SCHEDULE", 6), ("WINDOW SCHEDULE", 6), ("BUILDING ELEVATION", 6),
+            ("CROSS SECTION", 5), ("SITE PLAN", 5), ("HABITABLE ROOM", 5),
+            ("LIVING ROOM", 4), ("BEDROOM", 4), ("KITCHEN", 3), ("CORRIDOR", 3),
+            ("CEILING HEIGHT", 4), ("SETBACK", 4), ("BOUNDARY WALL", 4)
+        ]
+        for kw, weight in architectural_keywords:
+            if kw in text_upper:
+                scores["architectural"] += weight
+                indicators["architectural"].append(kw)
+
+        sorted_disciplines = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        top_disc, top_score = sorted_disciplines[0]
+
+        normalized_supplied = (supplied_discipline or "").strip().lower()
+        if normalized_supplied == "mep":
+            normalized_supplied = "electrical" if scores["electrical"] > scores["mechanical"] else "mechanical"
+        elif normalized_supplied in ["str", "structural_engineering"]:
+            normalized_supplied = "structural"
+        elif normalized_supplied in ["elec", "electrical_engineering"]:
+            normalized_supplied = "electrical"
+        elif normalized_supplied in ["mech", "plumbing", "sanitary", "hvac"]:
+            normalized_supplied = "mechanical"
+        elif normalized_supplied in ["arch"]:
+            normalized_supplied = "architectural"
+
+        if normalized_supplied in ["architectural", "structural", "mechanical", "electrical"]:
+            resolved_discipline = normalized_supplied
+        elif top_score >= 8:
+            resolved_discipline = top_disc
+        else:
+            resolved_discipline = "architectural"
+
+        # Determine specific drawing type title
+        drawing_type = "Engineering Drawing"
+        if resolved_discipline == "structural":
+            if any(k in text_upper for k in ["FOUNDATION", "FOOTING"]):
+                drawing_type = "Foundation & Footing Plan"
+            elif any(k in text_upper for k in ["BEAM", "COLUMN"]):
+                drawing_type = "Beam & Column Framing Layout"
+            elif any(k in text_upper for k in ["SLAB", "SOLID SLAB"]):
+                drawing_type = "Slab Reinforcement Plan"
+            elif any(k in text_upper for k in ["TRUSS", "ROOF"]):
+                drawing_type = "Roof Truss & Framing Plan"
+            else:
+                drawing_type = "Civil / Structural Engineering Plan"
+        elif resolved_discipline == "electrical":
+            if any(k in text_upper for k in ["SINGLE LINE", "SLD", "SCHEMATIC"]):
+                drawing_type = "Single Line Diagram (SLD) & DB Schedule"
+            elif any(k in text_upper for k in ["LIGHTING"]):
+                drawing_type = "Lighting & Luminaire Layout"
+            elif any(k in text_upper for k in ["POWER", "SOCKET"]):
+                drawing_type = "Small Power & Socket Layout"
+            elif any(k in text_upper for k in ["EARTHING", "LIGHTNING"]):
+                drawing_type = "Earthing & Lightning Protection Plan"
+            else:
+                drawing_type = "Electrical Services Layout"
+        elif resolved_discipline == "mechanical":
+            if any(k in text_upper for k in ["HVAC", "DUCT", "AIR CONDITIONING", "VENTILATION"]):
+                drawing_type = "HVAC & Mechanical Ventilation Plan"
+            elif any(k in text_upper for k in ["DRAINAGE", "SEWER", "SOIL", "PLUMBING"]):
+                drawing_type = "Sanitary Plumbing & Drainage Plan"
+            elif any(k in text_upper for k in ["FIRE", "HOSE REEL"]):
+                drawing_type = "Fire Protection & Suppression Layout"
+            elif any(k in text_upper for k in ["WATER", "RETICULATION"]):
+                drawing_type = "Water Reticulation & Storage Layout"
+            else:
+                drawing_type = "Mechanical Services Plan"
+        elif resolved_discipline == "architectural":
+            if any(k in text_upper for k in ["GROUND FLOOR", "FIRST FLOOR", "FLOOR PLAN"]):
+                drawing_type = "Architectural Floor Plan"
+            elif any(k in text_upper for k in ["ELEVATION"]):
+                drawing_type = "Building Elevations"
+            elif any(k in text_upper for k in ["SECTION"]):
+                drawing_type = "Building Cross Sections"
+            elif any(k in text_upper for k in ["SITE PLAN"]):
+                drawing_type = "Site & Block Plan"
+            else:
+                drawing_type = "Architectural General Layout"
+
+        confidence = min(0.99, max(0.60, round(top_score / 35.0, 2))) if top_score > 0 else 0.50
+
+        return {
+            "resolved_discipline": resolved_discipline,
+            "detected_discipline": top_disc if top_score >= 8 else resolved_discipline,
+            "drawing_type": drawing_type,
+            "confidence": confidence,
+            "scores": scores,
+            "indicators": indicators.get(resolved_discipline, [])[:6]
+        }
 
     @staticmethod
     def extract_door_and_window_vectors(pdf_path: str, scale_factor: float) -> Dict[str, Any]:
